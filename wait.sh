@@ -1,23 +1,24 @@
 #!/bin/bash
 # Waits for a deployment to complete.
 #
-# Includes a three-steps approach:
+# Includes a two-step approach:
 #
 # 1. Wait for the observed generation to match the specified one.
-# 2. Wait for the expected number of available replicas to match the specified one.
-# 3. Wait for the expected number of available pods to be in 'Ready' state
+# 2. Waits for the number of available replicas to match the specified one.
 #
-# Spawn from the answer to this StackOverflow question: http://stackoverflow.com/questions/37448357/ensure-kubernetes-deployment-has-completed-and-all-pods-are-updated-and-availabl
+# Spawn from my answer to this StackOverflow question: http://stackoverflow.com/questions/37448357/ensure-kubernetes-deployment-has-completed-and-all-pods-are-updated-and-availabl
 #
 set -o errexit
 set -o pipefail
+set -o nounset
 
 DEFAULT_TIMEOUT=60
 
 monitor_timeout() {
-  sleep ${timeout}
+  local -r wait_pid="$1"
+  sleep "${timeout}"
   echo "Timeout ${timeout} exceeded" >&2
-  kill $1
+  kill "${wait_pid}"
 }
 
 get_generation() {
@@ -37,50 +38,48 @@ get_available_replicas() {
 }
 
 get_deployment_jsonpath() {
-  local readonly _jsonpath="$1"
+  local -r jsonpath="$1"
 
-  kubectl get deployment "${deployment}" -o "jsonpath=${_jsonpath}"
+  kubectl get deployment "${deployment}" -o "jsonpath=${jsonpath}"
 }
 
-get_statuses_for_deployment() {
-  kubectl get pods --selector=app=${deployment} -o 'jsonpath={.items[*].status.conditions[*].type}'
-}
-
-count_ready_pods() {
-  get_statuses_for_deployment | tr ' ' '\n' | grep Ready | wc -l
-}
-
-
-if [[ $# -lt 1 ]]; then
-  echo "usage: $(basename $0) <deployment> [timeout]" >&2
+display_usage_and_exit() {
+  echo "Usage: $(basename "$0") <deployment> <[timeout]>" >&2
+  echo "Arguments:" >&2
+  echo "deployment - REQUIRED: The name of the deployment the script should wait on" >&2
+  echo "timeout    - OPTIONAL: How long to wait for the deployment to be available, defaults to ${DEFAULT_TIMEOUT} seconds, must be greater than 0" >&2
   exit 1
+}
+
+if [ $# -lt 1 ] || [ $# -gt 2 ] ; then
+  display_usage_and_exit
 fi
 
-if [[ $2 -gt 0 ]]; then
-  export timeout=$2
-else 
-  export timeout=$DEFAULT_TIMEOUT
+readonly deployment="$1"
+
+declare -xr timeout=${2:-$DEFAULT_TIMEOUT}
+if [[ ${timeout} -le 0 ]]; then
+  display_usage_and_exit
 fi
 
-echo "Waiting for deployment with timeout: ${timeout} seconds"
+echo "Waiting for deployment with timeout ${timeout} seconds"
 
 monitor_timeout $$ &
 readonly timeout_monitor_pid=$!
 
-readonly deployment="$1"
+trap 'kill ${timeout_monitor_pid}' EXIT #Stop timeout monitor
 
-readonly generation=$(get_generation)
-echo "Waiting for specified generation: ${generation} for deployment ${deployment} to be observed"
-
+generation=$(get_generation);  readonly generation
 current_generation=$(get_observed_generation)
+
+echo "Expected generation for deployment ${deployment}: ${generation}"
 while [[ ${current_generation} -lt ${generation} ]]; do
   sleep .5
-  echo "Current generation: ${current_generation}, expected generation: ${generation}, waiting"
-  current_generation=$(get_observed_generation)
+  echo "Currently observed generation: ${current_generation}"
 done
-echo "Observed expected generation: ${generation}"
+echo "Observed expected generation: ${current_generation}"
 
-readonly replicas="$(get_replicas)"
+replicas="$(get_replicas)"; readonly replicas
 echo "Expected replicas: ${replicas}"
 
 available=$(get_available_replicas)
@@ -89,14 +88,5 @@ while [[ ${available} -lt ${replicas} ]]; do
   echo "Available replicas: ${available}, waiting"
   available=$(get_available_replicas)
 done
-echo "Observed expected number of availabe replicas: ${available}"
 
-ready_pods=$(count_ready_pods)
-while [[ ${ready_pods} -lt ${replicas} ]]; do
-  sleep .5
-  echo "Ready pods: ${ready_pods}, expected pods to be ready: ${replicas}, waiting"
-  ready_pods=$(count_ready_pods)
-done
-
-kill ${timeout_monitor_pid} #Stop timeout monitor
-echo "Deployment of service ${deployment} successful. All ${ready_pods} ready"
+echo "Deployment of service ${deployment} successful. All ${available} replicas ready"
